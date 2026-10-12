@@ -11,6 +11,7 @@ const User = require('./models/User')
 const Order = require('./models/Order')
 
 const app = express()
+app.set('trust proxy', 1)
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD = '1234'
 const bookPrice = Number(process.env.BOOK_PRICE) > 0 ? Number(process.env.BOOK_PRICE) : 499
@@ -166,101 +167,46 @@ async function fetchWork(bookId) {
 }
 
 // ---------- cart ----------
-
 app.get('/cart', (req, res) => {
-    const cart = req.session.cart || [];
-    res.render('cart', {
-        cart,
-        total: cart.reduce(
-            (sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0),
-            0
-        )
-    });
-});
+    const cart = req.session.cart || []
+    res.render('cart', { cart, total: cartTotal(cart) })
+})
 
 app.post('/cart/add', async (req, res) => {
     try {
-        const bookId = String(req.body.bookId || '').trim();
-
-        if (!bookId) {
-            return res.status(400).send('Book ID missing.');
-        }
-
-        let book;
-
-        if (/^\/works\/OL\d+W$/.test(bookId)) {
-            const response = await fetch(
-                `https://openlibrary.org${bookId}.json`
-            );
-
-            if (!response.ok) {
-                return res.status(404).send('Book not found.');
-            }
-
-            const work = await response.json();
-            const coverId = work.covers?.[0];
-
-            book = {
-                id: bookId,
-                name: work.title || 'Unknown Book',
-                image: coverId
-                    ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`
-                    : ''
-            };
-        } else if (/^[a-fA-F0-9]{24}$/.test(bookId)) {
-            const saved = await mongoose.connection.db
-                .collection('Book_Details')
-                .findOne({
-                    _id: new mongoose.Types.ObjectId(bookId)
-                });
-
-            if (!saved) {
-                return res.status(404).send('Book not found.');
-            }
-
-            book = {
-                id: String(saved._id),
-                name: saved.name || 'Unknown Book',
-                image: saved.image || ''
-            };
+        const bookId = (req.body.bookId || '').trim()
+        let book
+        if (/^\/works\/OL[0-9]+W$/.test(bookId)) {
+            const response = await fetch(`https://openlibrary.org${bookId}.json`)
+            if (!response.ok) return res.status(404).send('Book not found.')
+            const work = await response.json()
+            const coverId = work.covers && work.covers[0]
+            book = { id: bookId, name: work.title || 'Unknown', image: coverId ? coverUrl(coverId) : '' }
+        } else if (isId(bookId)) {
+            const saved = await booksCollection().findOne({ _id: new mongoose.Types.ObjectId(bookId) })
+            if (!saved) return res.status(404).send('Book not found.')
+            book = { id: String(saved._id), name: saved.name || 'Unknown', image: saved.image || '' }
         } else {
-            return res.status(400).send('Invalid book ID.');
+            return res.status(400).send('Invalid book.')
         }
 
-        if (!req.session.cart) {
-            req.session.cart = [];
-        }
-
-        const existing = req.session.cart.find(
-            item => String(item.id) === String(book.id)
-        );
-
-        if (existing) {
-            existing.quantity = Math.min(
-                (Number(existing.quantity) || 1) + 1,
-                99
-            );
-        } else {
-            req.session.cart.push({
-                ...book,
-                price: bookPrice,
-                quantity: 1
-            });
-        }
-
-        req.session.save(err => {
-            if (err) {
-                console.error('Cart session error:', err);
-                return res.status(500).send('Could not save cart.');
-            }
-
-            res.redirect('/cart');
-        });
-    } catch (error) {
-        console.error('Add to cart error:', error);
-        res.status(500).send('Could not add book to cart.');
+        const cart = req.session.cart || (req.session.cart = [])
+        const existing = cart.find(item => item.id === book.id)
+        if (existing) existing.quantity = Math.min(existing.quantity + 1, 99)
+        else cart.push({ ...book, price: bookPrice, quantity: 1 })
+        req.session.save((error) => {
+    if (error) {
+        console.error('Cart session save error:', error)
+        return res.status(500).send('Could not save your cart.')
     }
-});
+
+    res.redirect('/cart')
+})
+    } catch (error) {
+        console.error('Could not add book to cart:', error.message)
+        res.status(500).send('Could not add book to cart.')
+    }
+})
 
 app.post('/cart/update', (req, res) => {
     const quantity = Number.parseInt(req.body.quantity, 10)
@@ -413,14 +359,37 @@ app.get('/about', (req, res) => res.render('about'))
 app.get('/contact', (req, res) => res.render('contact'))
 app.get('/admin/login', (req, res) => res.render('adminlogin'))
 
+
 app.post('/admin/login', (req, res) => {
-    if (req.body.username == ADMIN_USERNAME && req.body.password == ADMIN_PASSWORD) {
-        req.session.isAdmin = true
-        res.redirect('/books')
-    } else {
-        res.send('Invalid Username Or Password')
+    const username = (req.body.username || '').trim()
+    const password = req.body.password || ''
+
+    if (
+        username !== ADMIN_USERNAME ||
+        password !== ADMIN_PASSWORD
+    ) {
+        return res.status(401).send('Invalid username or password')
     }
+
+    req.session.regenerate((error) => {
+        if (error) {
+            console.error('Admin session error:', error)
+            return res.status(500).send('Could not start admin session.')
+        }
+
+        req.session.isAdmin = true
+
+        req.session.save((saveError) => {
+            if (saveError) {
+                console.error('Admin session save error:', saveError)
+                return res.status(500).send('Could not save admin session.')
+            }
+
+            res.redirect('/books')
+        })
+    })
 })
+
 
 app.post('/admin/logout', destroySession)
 
