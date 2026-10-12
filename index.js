@@ -166,39 +166,101 @@ async function fetchWork(bookId) {
 }
 
 // ---------- cart ----------
+
 app.get('/cart', (req, res) => {
-    const cart = req.session.cart || []
-    res.render('cart', { cart, total: cartTotal(cart) })
-})
+    const cart = req.session.cart || [];
+    res.render('cart', {
+        cart,
+        total: cart.reduce(
+            (sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0),
+            0
+        )
+    });
+});
 
 app.post('/cart/add', async (req, res) => {
     try {
-        const bookId = (req.body.bookId || '').trim()
-        let book
-        if (/^\/works\/OL[0-9]+W$/.test(bookId)) {
-            const response = await fetch(`https://openlibrary.org${bookId}.json`)
-            if (!response.ok) return res.status(404).send('Book not found.')
-            const work = await response.json()
-            const coverId = work.covers && work.covers[0]
-            book = { id: bookId, name: work.title || 'Unknown', image: coverId ? coverUrl(coverId) : '' }
-        } else if (isId(bookId)) {
-            const saved = await booksCollection().findOne({ _id: new mongoose.Types.ObjectId(bookId) })
-            if (!saved) return res.status(404).send('Book not found.')
-            book = { id: String(saved._id), name: saved.name || 'Unknown', image: saved.image || '' }
-        } else {
-            return res.status(400).send('Invalid book.')
+        const bookId = String(req.body.bookId || '').trim();
+
+        if (!bookId) {
+            return res.status(400).send('Book ID missing.');
         }
 
-        const cart = req.session.cart || (req.session.cart = [])
-        const existing = cart.find(item => item.id === book.id)
-        if (existing) existing.quantity = Math.min(existing.quantity + 1, 99)
-        else cart.push({ ...book, price: bookPrice, quantity: 1 })
-        res.redirect('/cart')
+        let book;
+
+        if (/^\/works\/OL\d+W$/.test(bookId)) {
+            const response = await fetch(
+                `https://openlibrary.org${bookId}.json`
+            );
+
+            if (!response.ok) {
+                return res.status(404).send('Book not found.');
+            }
+
+            const work = await response.json();
+            const coverId = work.covers?.[0];
+
+            book = {
+                id: bookId,
+                name: work.title || 'Unknown Book',
+                image: coverId
+                    ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`
+                    : ''
+            };
+        } else if (/^[a-fA-F0-9]{24}$/.test(bookId)) {
+            const saved = await mongoose.connection.db
+                .collection('Book_Details')
+                .findOne({
+                    _id: new mongoose.Types.ObjectId(bookId)
+                });
+
+            if (!saved) {
+                return res.status(404).send('Book not found.');
+            }
+
+            book = {
+                id: String(saved._id),
+                name: saved.name || 'Unknown Book',
+                image: saved.image || ''
+            };
+        } else {
+            return res.status(400).send('Invalid book ID.');
+        }
+
+        if (!req.session.cart) {
+            req.session.cart = [];
+        }
+
+        const existing = req.session.cart.find(
+            item => String(item.id) === String(book.id)
+        );
+
+        if (existing) {
+            existing.quantity = Math.min(
+                (Number(existing.quantity) || 1) + 1,
+                99
+            );
+        } else {
+            req.session.cart.push({
+                ...book,
+                price: bookPrice,
+                quantity: 1
+            });
+        }
+
+        req.session.save(err => {
+            if (err) {
+                console.error('Cart session error:', err);
+                return res.status(500).send('Could not save cart.');
+            }
+
+            res.redirect('/cart');
+        });
     } catch (error) {
-        console.error('Could not add book to cart:', error.message)
-        res.status(500).send('Could not add book to cart.')
+        console.error('Add to cart error:', error);
+        res.status(500).send('Could not add book to cart.');
     }
-})
+});
 
 app.post('/cart/update', (req, res) => {
     const quantity = Number.parseInt(req.body.quantity, 10)
